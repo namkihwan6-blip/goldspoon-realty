@@ -365,13 +365,24 @@ export default function HeroSection() {
     if (stateRef.current.started) return;
     stateRef.current.started = true;
 
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    const camWidth = isMobile ? 320 : 640;
+    const camHeight = isMobile ? 240 : 480;
+
     const init = async () => {
+      // Try camera + hand detection
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+          video: {
+            facingMode: "user",
+            width: { ideal: camWidth },
+            height: { ideal: camHeight },
+          },
         });
         if (webcamRef.current) {
           webcamRef.current.srcObject = stream;
+          webcamRef.current.setAttribute("playsinline", "true");
+          webcamRef.current.setAttribute("webkit-playsinline", "true");
           await webcamRef.current.play();
         }
         setControlLabel("손 제스처 모드");
@@ -388,6 +399,10 @@ export default function HeroSection() {
           cameraScript.onload = () => {
             const Hands = (window as any).Hands;
             const Camera = (window as any).Camera;
+            if (!Hands || !Camera) {
+              setupFallback();
+              return;
+            }
 
             const hands = new Hands({
               locateFile: (file: string) =>
@@ -396,8 +411,8 @@ export default function HeroSection() {
             hands.setOptions({
               maxNumHands: 1,
               modelComplexity: 0,
-              minDetectionConfidence: 0.3,
-              minTrackingConfidence: 0.2,
+              minDetectionConfidence: 0.25,
+              minTrackingConfidence: 0.15,
             });
             hands.onResults((results: any) => {
               if (results.multiHandLandmarks?.length > 0) {
@@ -406,22 +421,63 @@ export default function HeroSection() {
             });
 
             const camera = new Camera(webcamRef.current, {
-              onFrame: async () => { try { await hands.send({ image: webcamRef.current }); } catch {} },
-              width: 640,
-              height: 480,
+              onFrame: async () => {
+                try { await hands.send({ image: webcamRef.current }); } catch {}
+              },
+              width: camWidth,
+              height: camHeight,
             });
-            camera.start();
+            camera.start().catch(() => {
+              // Camera utility failed, try manual frame sending
+              const sendFrame = async () => {
+                if (webcamRef.current && webcamRef.current.readyState >= 2) {
+                  try { await hands.send({ image: webcamRef.current }); } catch {}
+                }
+                requestAnimationFrame(sendFrame);
+              };
+              sendFrame();
+            });
           };
         };
+
+        handsScript.onerror = () => setupFallback();
       } catch {
-        setControlLabel("마우스 모드");
-        const onMouseMove = (e: MouseEvent) => {
-          stateRef.current.targetRatio = Math.max(0, Math.min(1, 1 - e.clientY / window.innerHeight));
-        };
-        window.addEventListener("mousemove", onMouseMove);
+        setupFallback();
       }
 
       requestAnimationFrame(animationLoop);
+    };
+
+    // Fallback: mouse on desktop, touch on mobile
+    const setupFallback = () => {
+      if (isMobile) {
+        setControlLabel("터치 모드");
+        let touchStartY = 0;
+        let baseRatio = 0;
+        window.addEventListener("touchstart", (e) => {
+          touchStartY = e.touches[0].clientY;
+          baseRatio = stateRef.current.targetRatio;
+        }, { passive: true });
+        window.addEventListener("touchmove", (e) => {
+          const dy = touchStartY - e.touches[0].clientY;
+          const dragRatio = dy / (window.innerHeight * 0.4);
+          stateRef.current.targetRatio = Math.max(0, Math.min(1, baseRatio + dragRatio));
+        }, { passive: true });
+        // Double tap to toggle
+        let lastTap = 0;
+        window.addEventListener("touchend", () => {
+          const now = Date.now();
+          if (now - lastTap < 300) {
+            stateRef.current.targetRatio = stateRef.current.targetRatio > 0.5 ? 0 : 1;
+          }
+          lastTap = now;
+        });
+      } else {
+        setControlLabel("마우스 모드");
+        window.addEventListener("mousemove", (e) => {
+          stateRef.current.targetRatio = Math.max(0, Math.min(1, 1 - e.clientY / window.innerHeight));
+        });
+      }
     };
 
     init();
